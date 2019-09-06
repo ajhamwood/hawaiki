@@ -1,0 +1,281 @@
+<!doctype html>
+<html>
+<head>
+  <title>Hawaiki - a puzzle game</title>
+  <meta charset='UTF-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <meta name='keywords' content='hawaiki, puzzle game'>
+  <meta name='description' content='A puzzle game.'>
+  <link rel='icon' type='image/x-icon' href='data:image/x-icon;base64,'>
+  <style>
+body {
+  margin: 0;
+  overflow: hidden }
+canvas { background: black }
+  </style>
+</head>
+<body>
+  <canvas></canvas>
+  <script src='https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/build/three.min.js'></script>
+  <script src='machine.js'></script>
+  <script>
+
+// Game logic
+var Hawaiki = (() => {
+  let test = (obj, con) => obj.constructor === con || con.prototype.isPrototypeOf(obj);
+
+  // Hex grid
+  class Hex {
+    constructor (q, r, s) {
+      if (q + r + s) throw new Error('Invalid Hex');
+      Object.assign(this, {q, r, s})
+    }
+    add (b) { return new Hex(this.q + b.q, this.r + b.r, this.s + b.s) } // Not in use
+    subtract (b) { return new Hex(this.q - b.q, this.r - b.r, this.s - b.s) } // Not in use
+    scale (k) { return new Hex(this.q * k, this.r * k, this.s * k) } // Not in use
+    rotateLeft () { return new Hex(-this.s, -this.q, -this.r) } // Not in use
+    rotateRight () { return new Hex(-this.r, -this.s, -this.q) } // Not in use
+    neighbour (d) { return this.add(Hex.directions[d]) } // Not in use
+    diagNeighour (d) { return this.add(Hex.diagonals[d]) } // Not in use
+    len () { return (Math.abs(this.q) + Math.abs(this.r) + Math.abs(this.s)) / 2 } // Not in use
+    distance (b) { return this.subtract(b).len() } // Not in use
+    round () { // Not in use
+      var qi = Math.round(this.q), ri = Math.round(this.r), si = Math.round(this.s),
+      qd = Math.abs(qi - this.q), rd = Math.abs(ri - this.r), sd = Math.abs(si - this.s);
+      (qd > rd && qd > sd) ? (qi = -r - si) : (rd > sd) ? (ri = -qi - si) : (si = -qi - ri);
+      return new Hex(qi, ri, si)
+    }
+    lerp (b, t) { // Not in use
+      var l = (v1, v2) => v1 * (1 - t) + v2 * t;
+      return new Hex(l(this.q, b.q), l(this.r, b.r), l(this.s, b.s))
+    }
+  }
+  Object.assign(Hex, {
+    directions: [
+      [1, 0, -1], [1, -1, 0], [0, -1, 1],
+      [-1, 0, 1], [-1, 1, 0], [0, 1, -1]
+    ].map(args => new Hex(...args)),
+    diagonals: [
+      [2, -1, -1], [1, -2, 1], [-1, -1, 2],
+      [-2, 1, 1], [-1, 2, -1], [1, 1, -2]
+    ].map(args => new Hex(...args))
+  });
+
+  class Layout {
+    constructor (size) {
+      if (!test(size, THREE.Vector2)) throw new Error('Invalid Layout')
+      Object.assign(this, { size })
+    }
+    hexToPixel (h) {
+      let { size } = this;
+      return new THREE.Vector2(Math.sqrt(3) * (h.q + h.r / 2) * size.x, 1.5 * h.r * size.y)
+    }
+    pixelToHex (p) { // Not in use
+      let { size } = this, x = p.x / size.x, y = p.y / size.y,
+      q = (Math.sqrt(3) * x - y) / 3, r = 2 * x / 3 + y / 2;
+      return new Hex(q, r, -q - r)
+    }
+    hexCnrOffset (i) {
+      let { x, y } = this.size, angle = Math.PI * (.5 - i) / 3;
+      return new THREE.Vector2(x * Math.cos(angle), y * Math.sin(angle))
+    }
+    hexCorners (h) {
+      let corners = [], centre = this.hexToPixel(h);
+      for (let i = 0; i < 6; i++) {
+        let { x, y } = this.hexCnrOffset(i);
+        corners.push(new THREE.Vector2(centre.x + x, centre.y + y))
+      }
+      return corners
+    }
+  }
+
+  class Grid {
+    constructor (layout) {
+      if (!test(layout, Layout)) throw new Error('Invalid Grid')
+      this.layout = layout;
+      this.world = new Map()
+    }
+    hexMap (radius) {
+      for (let q = -radius; q <= radius; q++) {
+        let r1 = Math.max(-radius, -radius - q),
+        r2 = Math.min(radius, radius - q);
+        for (let r = r1; r <= r2; r++) this.world.set(q + ',' + r, {
+          hex: this.createHex(new Hex(q, r, -q - r)),
+          column: null
+        })
+      }
+    }
+    createHex (h) {
+      let shape = new THREE.Shape(), corners = this.layout.hexCorners(h);
+      shape.moveTo(corners[5].x, corners[5].y);
+      corners.forEach(({x, y}) => shape.lineTo(x, y));
+      let geom = new THREE.ExtrudeGeometry(shape, {
+        depth: 1/3, bevelThickness: .05, bevelSize: .2, bevelSegments: 1, bevelOffset: -.2
+      });
+      geom.rotateX(Math.PI / 2);
+      return geom
+    }
+    generateWorld () {
+      this.world.forEach((h, k) => {
+        let strata = new Array(strataHeight).fill(0).map((t, i) => {
+          if (i === 0) t = 'sand';
+          // else if (i < 3 || (((a, b) => a + b)(...k.split(',').map(Number)) === 2 && i === 3)) t = 'water';
+          else if (i < 8) t = 'water';
+          else t = 'air';
+          return new GameObject(h, t, k, i)
+        });
+        h.column = new Column(strata)
+      })
+    }
+  }
+
+  // Game objects
+  let strataHeight = 16;
+  class Column {
+    constructor (gameObjectList) {
+      if (gameObjectList.length !== strataHeight || gameObjectList.some(x => !test(x, GameObject)))
+        throw new Error('Invalid Column');
+      this.strata = gameObjectList
+    }
+  }
+
+  // Q: is it possible to shade using back distance - front distance?
+  let materials = {
+    sand: new THREE.MeshLambertMaterial({
+      color: '#6c5f34', emissive: '#c2b280', emissiveIntensity: .5
+    }),
+    water: new THREE.MeshBasicMaterial({
+      color: '#539dc2', transparent: true, opacity: .15,
+      depthTest: false
+    }),
+    air: new THREE.MeshBasicMaterial({
+      color: '#a7a69d', transparent: true, opacity: .01,
+      depthTest: false
+    })
+  };
+  class GameObject {
+    constructor (hex, type, k, i) {
+      this.material = materials[type];
+      this.obj = new THREE.Mesh(hex.hex, this.material);
+      this.obj.position.y += i / 3;
+      this.obj.name = k + ',' + i
+    }
+  }
+
+  return { Hex, Layout, Grid }
+})();
+
+
+// Page state
+var app = new $.Machine({
+  grid: null, canvas: null, ctx: null,
+  scene: null, renderer: null, camera: null, controls: null,
+  drag: false
+});
+
+// UI events
+$.targets({
+  load () { app.emit('init') },
+  resize () { app.emit('resize') },
+  app: {
+    init () {
+      this.canvas = $('canvas')[0];
+      this.scene = new THREE.Scene();
+      this.renderer = new THREE.WebGLRenderer({canvas: this.canvas, antialias: true, alpha: true});
+
+      this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, .01, 1000);
+      this.camera.position.x = -10;
+      this.camera.position.y = 10;
+      this.camera.lookAt(0, 0, 0);
+
+      this.scene.add(this.camera);
+
+      let pointLight = new THREE.PointLight(0xffffff);
+      Object.assign(pointLight.position, { x: 6, y: 5, z: 17 });
+      this.scene.add(pointLight);
+
+      let layout = new Hawaiki.Layout(new THREE.Vector2(1, 1));
+      this.grid = new Hawaiki.Grid(layout);
+      this.grid.hexMap(3);
+      this.grid.generateWorld();
+      this.grid.world.forEach(h => h.column.strata.forEach(obj => this.scene.add(obj.obj)));
+
+      app.emit('resize');
+      app.emit('animate')
+    },
+    resize () {
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.camera.aspect = window.innerWidth / window.innerHeight;
+      this.camera.updateProjectionMatrix();
+    },
+    animate () {
+      this.renderer.render(this.scene, this.camera);
+      requestAnimationFrame(() => setTimeout(() => app.emit('animate'), 1000/30))
+    }
+  }
+});
+
+// Rotation controls
+var rotator = new $.Machine({
+  mousedown: false,
+  mousePrev: new THREE.Vector2(),
+  mouse: new THREE.Vector2(),
+  xAxis: new THREE.Vector3(0, -1, 0),
+  yAxis: new THREE.Vector3(0, 0, -1),
+  origin: new THREE.Vector3(0, 0, 0),
+
+  rotSensitivity: .003,
+  transSensitivity: .02
+});
+
+$.targets({
+  'mousedown mousemove mouseup mouseout' (e) {
+    e.preventDefault();
+    rotator.emit(e.type, e.clientX, e.clientY, e.shiftKey)
+  },
+  'touchstart touchmove touchend' (e) {
+    e.preventDefault();
+    rotator.emit(e.type, e.touches, e.shiftKey)
+  },
+  rotator: {
+    mousedown (x, y) {
+      this.mousedown = true;
+      this.mousePrev.set(x, y);
+    },
+    mousemove (x, y, shift) {
+      if (this.mousedown) {
+        let { camera } = app.state(),
+            { xAxis, yAxis, origin, mouse, mousePrev, rotSensitivity, transSensitivity } = this;
+        mouse.set(x, y);
+        mousePrev.sub(mouse).negate();
+        if (shift) {
+          camera.position.sub(origin);
+          camera.position.applyAxisAngle(xAxis, mousePrev.x * rotSensitivity);
+          camera.position.applyAxisAngle(yAxis, mousePrev.y * rotSensitivity);
+          camera.position.add(origin);
+          camera.lookAt(origin);
+          yAxis.applyAxisAngle(xAxis, mousePrev.x * rotSensitivity)
+        } else {
+          let delta = yAxis.clone().applyAxisAngle(xAxis, Math.PI / 2).multiplyScalar(mousePrev.y * transSensitivity)
+                .add(yAxis.clone().multiplyScalar(mousePrev.x * transSensitivity))
+          camera.position.add(delta);
+          origin.add(delta)
+        }
+        mousePrev.copy(this.mouse)
+      }
+    },
+    'mouseup mouseout touchend' () {
+      this.mousedown = false
+    },
+    touchstart (touches, shift) {
+      if (touches.length === 1) rotator.emit('mousedown', touches[0].pageX, touches[0].pageY, shift)
+    },
+    touchmove (touches, shift) {
+      if (touches.length === 1) rotator.emit('mousemove', touches[0].pageX, touches[0].pageY, shift)
+    }
+  }
+})
+  </script>
+  <noscript><h6>Only viewable with JavaScript enabled.</h6></noscript>
+</body>
+</html>
